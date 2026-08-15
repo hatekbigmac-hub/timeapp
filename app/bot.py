@@ -435,9 +435,9 @@ class TelegramBot(threading.Thread):
             if not (pin.isdigit() and 4 <= len(pin) <= 8):
                 self.send(chat_id, t(lang, "cmd_botpin_bad"))
                 return
-            self.store.set_bot_pin(pin)          # revokes every unlocked chat
-            self.store.unlock_admin(chat_id)      # keep the admin who set it signed in
+            self.store.set_bot_pin(pin)  # revokes EVERY session, including this one
             self.send(chat_id, t(lang, "cmd_botpin_set"))
+            self.send(chat_id, t(lang, "enter_bot_pin"))  # the setter must enter it too
         elif cmd == "/clearbotpin":
             self.store.clear_bot_pin()
             self.send(chat_id, t(lang, "cmd_botpin_cleared"))
