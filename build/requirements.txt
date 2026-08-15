@@ -1,0 +1,5 @@
+PySide6-Essentials>=6.6
+requests>=2.31
+pyinstaller>=6.3
+pillow>=10.0
+comtypes>=1.2

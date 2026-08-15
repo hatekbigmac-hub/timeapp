@@ -1,0 +1,25 @@
+# --- secrets (never publish) ---
+app/secret_token.py
+**/data.json
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- build output ---
+dist/
+build/*/
+build/app.ico
+build/app_256.png
+*.spec
+
+# --- os / editor ---
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.log
