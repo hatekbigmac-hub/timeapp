@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import secrets
+import shutil
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -52,12 +53,36 @@ class Store:
         self.data = json.loads(json.dumps(_DEFAULT))
         self._load()
 
-    def _load(self):
+    @property
+    def _bak(self):
+        return self.path.with_suffix(".bak")
+
+    @staticmethod
+    def _read_json(path):
         try:
-            raw = json.loads(self.path.read_text("utf-8"))
-        except (OSError, ValueError):
-            return
-        if not isinstance(raw, dict):
+            text = path.read_text("utf-8")
+        except OSError:
+            return None
+        if not text.strip():
+            return None  # empty/truncated (e.g. a crash mid-write)
+        try:
+            data = json.loads(text)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _load(self):
+        raw = self._read_json(self.path)
+        if raw is None:
+            raw = self._read_json(self._bak)  # main lost/corrupt -> recover the backup
+        if raw is None:
+            # Nothing parsed. If a non-empty main file exists it is corrupt: keep a
+            # copy instead of silently overwriting it, then start from defaults.
+            try:
+                if self.path.exists() and self.path.stat().st_size > 0:
+                    shutil.copy2(self.path, self.path.with_suffix(".corrupt"))
+            except OSError:
+                pass
             return
         for key, default in self.data.items():
             if key not in raw:
@@ -72,8 +97,21 @@ class Store:
             payload = json.dumps(self.data, ensure_ascii=False, indent=2)
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(payload, "utf-8")
+            # write + flush + fsync so the bytes really hit the disk before the
+            # atomic rename — a power loss right after a reboot can otherwise leave
+            # a zero-length file that wipes every setting.
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
             os.replace(tmp, self.path)
+            try:
+                shutil.copy2(self.path, self._bak)  # keep a known-good backup
+            except OSError:
+                pass
 
     # -- time accounting ------------------------------------------------
     @staticmethod

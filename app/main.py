@@ -198,6 +198,82 @@ def run_selftest() -> int:
             tr4.account(1.0, False, 0.0, "d4", "chrome.exe")
         assert dict(st.top_apps("d4")).get("chrome.exe") == 10, "per-app time recorded"
 
+    # --- reboot resilience: durable storage recovers a corrupt/empty file ---
+    with tempfile.TemporaryDirectory() as tmp:
+        from storage import Store
+        st = Store(tmp)
+        st.set_config("token", "TOKEN123")
+        st.set_config("daily_limit_min", 42)
+        st.path.write_text("{ this is broken json", encoding="utf-8")   # corrupt main
+        st2 = Store(tmp)
+        assert st2.get_config("token") == "TOKEN123", "config recovered from backup, not wiped"
+        assert st2.get_config("daily_limit_min") == 42, "latest value recovered from backup"
+        st.path.write_text("", encoding="utf-8")                        # empty (crash mid-write)
+        st3 = Store(tmp)
+        assert st3.get_config("token") == "TOKEN123", "empty main recovers from backup"
+
+    # --- reboot resilience: in-progress break resumes after a restart ---
+    with tempfile.TemporaryDirectory() as tmp:
+        from storage import Store
+        from policy import Policy
+        wall = [10_000.0]
+        day = "2026-05-05"
+        st = Store(tmp)
+        st.set_config("work_min", 30)
+        st.set_config("break_min", 15)
+        ev = threading.Event()
+        p = Policy(st, ev, clock=lambda: wall[0], today_fn=lambda: day)
+        st.add_time(day, 30 * 60, 30 * 60)              # 30 min streak -> break starts
+        assert p.tick()["reason"] == "cycle", "cycle break starts"
+        # "reboot" 5 min into the 15-min break: fresh Policy + Event, same store
+        wall[0] += 5 * 60
+        ev2 = threading.Event()
+        p2 = Policy(st, ev2, clock=lambda: wall[0], today_fn=lambda: day)
+        assert ev2.is_set(), "resumed break re-blocks immediately after restart"
+        r = p2.tick()
+        assert r["block"] and r["reason"] == "cycle", "break still active after restart"
+        assert 590 <= r["remaining"] <= 600, f"~10 min of the 15 left, got {r['remaining']}"
+        # if the whole break elapsed while the PC was off, it is over on restart
+        wall[0] += 20 * 60
+        ev3 = threading.Event()
+        p3 = Policy(st, ev3, clock=lambda: wall[0], today_fn=lambda: day)
+        assert not ev3.is_set() and not p3.tick()["block"], "elapsed break is finished"
+
+    # --- reboot resilience: daily-limit block + work-streak survive restart ---
+    with tempfile.TemporaryDirectory() as tmp:
+        from storage import Store
+        from policy import Policy
+        st = Store(tmp)
+        st.set_config("daily_limit_min", 10)            # 600s
+        st.add_time("d", 700, 700)
+        ev = threading.Event()
+        assert Policy(st, ev, clock=lambda: 1.0, today_fn=lambda: "d").tick()["reason"] == "limit"
+        ev2 = threading.Event()
+        p2 = Policy(st, ev2, clock=lambda: 2.0, today_fn=lambda: "d")
+        assert ev2.is_set() and p2.tick()["reason"] == "limit", "limit block persists across restart"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        from storage import Store
+        from policy import Policy
+        wall = [100.0]
+        st = Store(tmp)
+        st.set_config("work_min", 30)
+        st.set_config("break_min", 15)
+        ev = threading.Event()
+        p = Policy(st, ev, clock=lambda: wall[0], today_fn=lambda: "d")
+        st.add_time("d", 30 * 60, 30 * 60)              # 30 min -> break
+        assert p.tick()["reason"] == "cycle"
+        st.push_command("unlock")
+        wall[0] += 1
+        assert not p.tick()["block"]                    # break ended, baseline ~= 1800s
+        # restart: the non-zero baseline must be restored so the streak keeps counting
+        ev2 = threading.Event()
+        p2 = Policy(st, ev2, clock=lambda: wall[0], today_fn=lambda: "d")
+        st.add_time("d", 29 * 60, 29 * 60)              # 59 min total, streak 29 < 30
+        assert not p2.tick()["block"], "streak baseline preserved -> no early break"
+        st.add_time("d", 2 * 60, 2 * 60)                # 61 min total, streak 31 >= 30
+        assert p2.tick()["reason"] == "cycle", "breaks again after another full work period"
+
     # --- i18n parity + formatting ---
     from i18n import STRINGS, fmt_duration, fmt_minutes, t
     assert set(STRINGS["en"]) == set(STRINGS["uk"]), "i18n key parity"
@@ -344,6 +420,9 @@ def main() -> int:
     from i18n import t as _t
 
     blocking_event = threading.Event()
+    # Build the policy first: it restores a break that was in progress before a
+    # reboot and sets blocking_event, so the tracker never counts that gap.
+    policy = Policy(store, blocking_event)
     tracker = Tracker(store, blocking_event)
     tracker.start()
 
@@ -381,7 +460,7 @@ def main() -> int:
                       update_hook=update_hook, uninstall_hook=uninstall_hook)
     bot.start()
     blocker = InputBlocker()
-    policy = Policy(store, blocking_event, notifier=bot.notify)
+    policy.set_notifier(bot.notify)
     webguard = WebGuard(store)
 
     checker = updater.UpdateChecker(

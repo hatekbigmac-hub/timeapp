@@ -1,11 +1,18 @@
 """Screen-time policy engine: daily limit + work/break cycle + manual breaks.
 
-Pure state machine driven by tick(). It reads settings/usage from the Store,
-toggles a shared blocking Event (read by the tracker so it stops counting), and
-returns an action dict the GUI uses to show/hide the fullscreen break overlay.
+State machine driven by tick(). It reads settings/usage from the Store, toggles
+a shared blocking Event (read by the tracker so it stops counting), and returns
+an action dict the GUI uses to show/hide the fullscreen break overlay.
 
-Clocks are injectable so the whole thing is unit-testable without real time:
-  clock()    -> monotonic seconds (break countdowns)
+Persistence: the runtime state (mode, break deadline, work-streak baseline) is
+saved to the Store and restored on start, using a WALL clock so it survives a
+reboot. Without this, a restart would drop an in-progress break and reset the
+time-until-break to zero. Break deadlines are absolute wall timestamps, so a
+break that elapsed while the PC was off is correctly treated as finished, and a
+break interrupted by a reboot resumes with the right time left.
+
+Clocks are injectable for testing:
+  clock()    -> wall-clock seconds (time.time); break deadlines are stored in it
   today_fn() -> "YYYY-MM-DD" (day rollover / bonus lookup)
 """
 
@@ -13,20 +20,62 @@ import time
 
 
 class Policy:
-    def __init__(self, store, blocking_event, clock=time.monotonic,
+    def __init__(self, store, blocking_event, clock=time.time,
                  today_fn=None, notifier=None):
         self.store = store
         self.blocking = blocking_event
         self.clock = clock
         self.today_fn = today_fn or store.today_key
         self.notifier = notifier
+        self.current_day = self.today_fn()
+        self._warned = False
         self.mode = "work"          # "work" | "break"
         self.reason = None          # "cycle" | "manual" | "limit"
-        self.break_end = None       # monotonic deadline, or None for open-ended (limit)
+        self.break_end = None       # absolute wall deadline, or None (open-ended limit)
         self.baseline_active = 0.0  # active-seconds mark at the start of this work streak
-        self.current_day = self.today_fn()
-        self._warned = False        # emitted the "block approaching" warning already?
+        self._restore()
 
+    # -- persistence ----------------------------------------------------
+    def _restore(self):
+        st = self.store.get_config("policy_state", {}) or {}
+        mode = st.get("mode")
+        self.mode = mode if mode in ("work", "break") else "work"
+        self.reason = st.get("reason")
+        end = st.get("break_end")
+        self.break_end = float(end) if isinstance(end, (int, float)) else None
+        try:
+            self.baseline_active = float(st.get("baseline_active", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            self.baseline_active = 0.0
+
+        now = self.clock()
+        active, _screen = self.store.day_stats(self.current_day)
+        if st.get("baseline_day") != self.current_day:
+            self.baseline_active = 0.0  # a new day resets the work streak
+            if self.mode == "break" and self.reason == "limit":
+                self.mode, self.reason, self.break_end = "work", None, None
+
+        if self.mode == "break":
+            if self.reason == "limit":
+                self.blocking.set()   # tick() re-checks the limit and clears if under
+            elif self.break_end is not None and (self.break_end - now) > 0:
+                self.blocking.set()   # timed break still has time left -> resume it
+            else:
+                self._end_break(active, notify=False)  # elapsed while the PC was off
+        else:
+            self.blocking.clear()
+        self._save_state()
+
+    def _save_state(self):
+        self.store.set_config("policy_state", {
+            "mode": self.mode,
+            "reason": self.reason,
+            "break_end": self.break_end,
+            "baseline_active": self.baseline_active,
+            "baseline_day": self.current_day,
+        })
+
+    # -- helpers --------------------------------------------------------
     def set_notifier(self, notifier):
         self.notifier = notifier
 
@@ -41,8 +90,7 @@ class Policy:
         limit_min = int(self.store.get_config("daily_limit_min", 0) or 0)
         if limit_min <= 0:
             return None
-        bonus_min = int(self.store.get_bonus(day))
-        return (limit_min + bonus_min) * 60
+        return (limit_min + int(self.store.get_bonus(day))) * 60
 
     def _over_limit(self, day, active):
         limit = self._limit_seconds(day)
@@ -53,6 +101,7 @@ class Policy:
         self.reason = reason
         self.break_end = now + duration
         self.blocking.set()
+        self._save_state()
         self._notify("notify_break")
 
     def _start_limit_block(self):
@@ -60,9 +109,10 @@ class Policy:
         self.reason = "limit"
         self.break_end = None
         self.blocking.set()
+        self._save_state()
         self._notify("notify_limit")
 
-    def _end_break(self, active_today):
+    def _end_break(self, active_today, notify=True):
         was_break = self.mode == "break"
         self.mode = "work"
         self.reason = None
@@ -70,7 +120,8 @@ class Policy:
         self.baseline_active = active_today
         self._warned = False
         self.blocking.clear()
-        if was_break:
+        self._save_state()
+        if was_break and notify:
             self._notify("notify_break_over")
 
     def _warning(self, day, active):
@@ -99,6 +150,7 @@ class Policy:
         self._warned = True
         return {"kind": approaching[0], "seconds": approaching[1]}
 
+    # -- main tick ------------------------------------------------------
     def tick(self):
         now = self.clock()
         day = self.today_fn()
@@ -107,6 +159,8 @@ class Policy:
             self.baseline_active = 0.0
             if self.mode == "break" and self.reason == "limit":
                 self._end_break(0.0)
+            else:
+                self._save_state()
 
         active, _screen = self.store.day_stats(day)
 
