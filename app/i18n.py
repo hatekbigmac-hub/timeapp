@@ -88,7 +88,7 @@ STRINGS = {
         "tray_quit": "Quit",
         "status_starting": "Connecting to Telegram…",
         "status_ok": "Bot is online",
-        "status_network": "No internet — retrying…",
+        "status_network": "Can't reach Telegram — retrying…",
         "status_conflict": "This bot token is used on another PC",
         "status_unauthorized": "Bot token is invalid",
         "status_no_token": "Set the bot token in ⚙ Settings",
@@ -177,6 +177,8 @@ STRINGS = {
         "uninstall_done": "\U0001F5D1 Removing TimeApp. Goodbye!",
         "set_guard_label": "Keep running (relaunch if closed)",
         "set_guard_hint": "Relaunches the app if it is closed or killed. Removal is only via the bot.",
+        "set_proxy_label": "Proxy (optional)",
+        "set_proxy_hint": "Only if Telegram is blocked or behind a company proxy, e.g. http://host:port or socks5://host:port. Leave empty for a normal connection.",
     },
     "uk": {
         # --- bot: onboarding ---
@@ -263,7 +265,7 @@ STRINGS = {
         "tray_quit": "Вийти",
         "status_starting": "Підключення до Telegram…",
         "status_ok": "Бот на звʼязку",
-        "status_network": "Немає інтернету — повторюю…",
+        "status_network": "Не вдається зʼєднатися з Telegram — повторюю…",
         "status_conflict": "Токен цього бота вже зайнятий на іншому ПК",
         "status_unauthorized": "Токен бота недійсний",
         "status_no_token": "Встав токен бота у ⚙ Налаштуваннях",
@@ -352,6 +354,8 @@ STRINGS = {
         "uninstall_done": "\U0001F5D1 Видаляю TimeApp. Бувай!",
         "set_guard_label": "Тримати запущеним (перезапуск при закритті)",
         "set_guard_hint": "Перезапускає застосунок, якщо його закрили чи завершили. Видалення лише через бота.",
+        "set_proxy_label": "Проксі (необовʼязково)",
+        "set_proxy_hint": "Лише якщо Telegram заблоковано або є корпоративний проксі, напр. http://host:port або socks5://host:port. Для звичайного зʼєднання лиши порожнім.",
     },
 }
 

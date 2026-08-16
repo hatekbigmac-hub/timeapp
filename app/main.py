@@ -284,6 +284,15 @@ def run_selftest() -> int:
     for state in ("starting", "ok", "network", "conflict", "unauthorized"):
         assert t("en", f"status_{state}") != f"status_{state}", f"status key {state}"
 
+    # --- network setup + proxy config ---
+    setup_network("")  # must never raise, even if truststore is unavailable
+    with tempfile.TemporaryDirectory() as tmp:
+        from storage import Store
+        st = Store(tmp)
+        assert st.get_config("proxy", "") == "", "proxy empty by default"
+        st.set_config("proxy", "http://127.0.0.1:8080")
+        assert Store(tmp).get_config("proxy") == "http://127.0.0.1:8080", "proxy persists"
+
     # --- winutil ---
     import winutil
     assert isinstance(winutil.get_idle_seconds(), float), "idle seconds"
@@ -338,9 +347,79 @@ def run_selftest() -> int:
     return 0
 
 
+def setup_network(proxy: str = ""):
+    """Make HTTPS work on PCs where an antivirus/corporate proxy intercepts TLS.
+
+    Injecting the OS (Windows) certificate store lets requests validate against
+    the roots the machine already trusts — including the ones antivirus HTTPS
+    scanners install — instead of only the bundled certifi roots, which is the
+    usual reason a PC with working internet reports "can't reach Telegram".
+    An optional manual proxy is applied via the environment so both the bot and
+    the updater pick it up.
+    """
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+    except Exception:
+        pass
+    import os
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        os.environ.pop(key, None)
+    if proxy:
+        os.environ["HTTP_PROXY"] = proxy
+        os.environ["HTTPS_PROXY"] = proxy
+
+
+def run_nettest() -> int:
+    """`TimeApp.exe --nettest` — write a diagnostic of why Telegram is unreachable."""
+    import os
+    import tempfile
+    import urllib.request
+
+    import requests
+    from storage import Store
+
+    store = Store()
+    token = store.get_config("token", "") or ""
+    proxy = store.get_config("proxy", "") or ""
+    url = f"https://api.telegram.org/bot{token}/getMe" if token else "https://api.telegram.org/"
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    lines = [
+        "TimeApp network diagnostic",
+        "system proxies: " + str(urllib.request.getproxies()),
+        "configured proxy: " + (proxy or "(none)"),
+    ]
+
+    def attempt(label):
+        try:
+            resp = requests.get(url, timeout=15, proxies=proxies)
+            lines.append(f"{label}: OK (HTTP {resp.status_code})")
+            return True
+        except Exception as exc:  # noqa: BLE001 - diagnostic
+            lines.append(f"{label}: FAIL {type(exc).__name__}: {str(exc)[:200]}")
+            return False
+
+    attempt("with bundled certs")     # what a plain requests call does today
+    try:
+        import truststore
+        truststore.inject_into_ssl()
+        lines.append("OS trust store: injected")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"OS trust store: inject failed: {exc}")
+    attempt("with Windows trust store")
+
+    out = os.path.join(tempfile.gettempdir(), "timeapp_nettest.txt")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    os._exit(0)
+
+
 def main() -> int:
     if "--selftest" in sys.argv:
         return run_selftest()
+
+    if "--nettest" in sys.argv:
+        return run_nettest()
 
     if "--urltest" in sys.argv:
         # 20s diagnostic: log what the address bar reports, to verify that
@@ -399,6 +478,8 @@ def main() -> int:
     import guardian
     from storage import Store
     store = Store()
+    # trust the OS certificate store + apply any manual proxy before any request
+    setup_network(store.get_config("proxy", "") or "")
     token = store.get_config("token") or DEFAULT_TOKEN
     store.set_config("token", token)
 

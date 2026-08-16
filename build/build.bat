@@ -37,7 +37,7 @@ if errorlevel 1 ( echo icon build failed & pause & exit /b 1 )
 echo Building TimeApp.exe (this takes a few minutes)...
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onefile --windowed ^
   --name TimeApp --icon build\app.ico ^
-  --collect-submodules comtypes app\main.py
+  --collect-submodules comtypes --collect-submodules truststore app\main.py
 if errorlevel 1 ( echo PyInstaller failed & pause & exit /b 1 )
 
 echo.

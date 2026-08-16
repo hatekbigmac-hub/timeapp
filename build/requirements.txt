@@ -3,3 +3,4 @@ requests>=2.31
 pyinstaller>=6.3
 pillow>=10.0
 comtypes>=1.2
+truststore>=0.9

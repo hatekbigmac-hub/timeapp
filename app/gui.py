@@ -306,6 +306,16 @@ class SettingsDialog(QDialog):
         self.saved_label.setStyleSheet(f"color:{icons.ACCENT2}; font-size:12px;")
         root.addWidget(self.saved_label)
 
+        root.addSpacing(8)
+
+        # --- proxy (for PCs where Telegram is blocked / behind a proxy) ---
+        self._section(root, "set_proxy_label")
+        self._hint(root, "set_proxy_hint")
+        self.proxy_input = QLineEdit(self.store.get_config("proxy", "") or "")
+        self.proxy_input.setPlaceholderText("http://host:port")
+        self.proxy_input.editingFinished.connect(self._save_proxy)
+        root.addWidget(self.proxy_input)
+
         root.addStretch(1)
         btn_close = QPushButton(t(self.lang, "set_close"))
         btn_close.clicked.connect(self.accept)
@@ -352,6 +362,17 @@ class SettingsDialog(QDialog):
             self.on_token_apply(token)
             self.saved_label.setText(t(self.lang, "set_saved"))
             QTimer.singleShot(1500, lambda: self.saved_label.setText(""))
+
+    def _save_proxy(self):
+        proxy = self.proxy_input.text().strip()
+        self.store.set_config("proxy", proxy)
+        # apply live so the bot and updater pick it up on the next request
+        import os
+        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ.pop(key, None)
+        if proxy:
+            os.environ["HTTP_PROXY"] = proxy
+            os.environ["HTTPS_PROXY"] = proxy
 
     def _reload_blocks(self):
         while self.blocks_box.count():
@@ -692,6 +713,8 @@ class MainWindow(QWidget):
         self.status_dot.setStyleSheet(
             f"background:{STATUS_COLORS.get(status, '#F5B942')}; border-radius:5px;")
         self.status_label.setText(t(self.lang, f"status_{status}"))
+        # surface the real reason behind a failed connection for diagnosis
+        self.status_label.setToolTip(getattr(self.bot, "last_error", "") if status == "network" else "")
         self.btn_bot.setEnabled(bool(self.bot.username))
         if self.bot.username:
             self.btn_bot.setToolTip(f"https://t.me/{self.bot.username}")

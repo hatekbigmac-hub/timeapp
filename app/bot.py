@@ -45,6 +45,7 @@ class TelegramBot(threading.Thread):
         self.notify_q = queue.Queue()
         self.username = None
         self.status = "starting"
+        self.last_error = ""
         self.offset = 0
 
     # -- low-level API ---------------------------------------------------
@@ -121,14 +122,17 @@ class TelegramBot(threading.Thread):
                 me = self.api("getMe")
                 self.username = me.get("username")
                 self.status = "ok"
+                self.last_error = ""
                 break
             except BotApiError as exc:
                 if exc.code == 401:
                     self.status = "unauthorized"
                     return
                 self.status = "network"
-            except Exception:
+                self.last_error = str(exc)[:200]
+            except Exception as exc:
                 self.status = "network"
+                self.last_error = str(exc)[:200]
             self.stop_event.wait(5)
 
         threading.Thread(target=self._notify_loop, daemon=True, name="tg-notify").start()
@@ -141,14 +145,17 @@ class TelegramBot(threading.Thread):
                     "allowed_updates": ["message", "callback_query"],
                 }, http_timeout=self.POLL_TIMEOUT + 10)
                 self.status = "ok"
+                self.last_error = ""
             except BotApiError as exc:
                 self.status = {409: "conflict", 401: "unauthorized"}.get(exc.code, "network")
                 if exc.code == 401:
                     return
+                self.last_error = str(exc)[:200]
                 self.stop_event.wait(5)
                 continue
-            except requests.RequestException:
+            except requests.RequestException as exc:
                 self.status = "network"
+                self.last_error = str(exc)[:200]
                 self.stop_event.wait(5)
                 continue
             for update in updates or []:
