@@ -4,7 +4,7 @@ Bump this before building a release, and tag the GitHub release with the same
 number (e.g. v1.1.0) so the updater can compare them.
 """
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 
 def parse(text) -> tuple:

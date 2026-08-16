@@ -362,6 +362,7 @@ def setup_network(proxy: str = ""):
         truststore.inject_into_ssl()
     except Exception:
         pass
+    _prefer_ipv4()
     import os
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         os.environ.pop(key, None)
@@ -370,47 +371,111 @@ def setup_network(proxy: str = ""):
         os.environ["HTTPS_PROXY"] = proxy
 
 
+def _prefer_ipv4():
+    """Prefer IPv4 for outgoing connections.
+
+    On networks whose IPv6 is advertised but broken, Python tries the IPv6
+    address first and stalls until timeout — the app then reports "can't reach
+    Telegram" although IPv4 internet works fine. We filter DNS results to IPv4,
+    falling back to whatever exists so IPv6-only setups still work.
+    """
+    import socket
+    if getattr(socket, "_timeapp_ipv4", False):
+        return
+    original = socket.getaddrinfo
+
+    def ipv4_first(host, *args, **kwargs):
+        results = original(host, *args, **kwargs)
+        v4 = [r for r in results if r[0] == socket.AF_INET]
+        return v4 or results
+
+    socket.getaddrinfo = ipv4_first
+    socket._timeapp_ipv4 = True
+
+
 def run_nettest() -> int:
-    """`TimeApp.exe --nettest` — write a diagnostic of why Telegram is unreachable."""
+    """`TimeApp.exe --nettest` — write a full diagnostic of why Telegram fails."""
     import os
+    import socket
+    import ssl
     import tempfile
     import urllib.request
 
     import requests
+    import version
     from storage import Store
 
     store = Store()
     token = store.get_config("token", "") or ""
     proxy = store.get_config("proxy", "") or ""
-    url = f"https://api.telegram.org/bot{token}/getMe" if token else "https://api.telegram.org/"
+    host = "api.telegram.org"
+    url = f"https://{host}/bot{token}/getMe" if token else f"https://{host}/"
     proxies = {"http": proxy, "https": proxy} if proxy else None
-    lines = [
-        "TimeApp network diagnostic",
-        "system proxies: " + str(urllib.request.getproxies()),
-        "configured proxy: " + (proxy or "(none)"),
-    ]
+    lines = ["TimeApp network diagnostic", f"app version: {version.APP_VERSION}",
+             "system proxies: " + str(urllib.request.getproxies()),
+             "configured proxy: " + (proxy or "(none)")]
 
-    def attempt(label):
+    # 1) DNS
+    try:
+        infos = socket.getaddrinfo(host, 443)
+        ips = sorted({i[4][0] for i in infos})
+        v4 = [ip for ip in ips if ":" not in ip]
+        v6 = [ip for ip in ips if ":" in ip]
+        lines.append(f"DNS: IPv4={v4 or 'none'}  IPv6={v6 or 'none'}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"DNS: FAIL {type(exc).__name__}: {exc}")
+        v4 = v6 = []
+
+    # 2) raw TCP :443 to each family (is the port even reachable?)
+    def tcp(ip, family, label):
+        s = socket.socket(family, socket.SOCK_STREAM)
+        s.settimeout(8)
+        try:
+            s.connect((ip, 443))
+            lines.append(f"TCP {label} {ip}:443: OK")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"TCP {label} {ip}:443: FAIL {type(exc).__name__}: {str(exc)[:120]}")
+        finally:
+            s.close()
+
+    if v4:
+        tcp(v4[0], socket.AF_INET, "IPv4")
+    if v6:
+        tcp(v6[0], socket.AF_INET6, "IPv6")
+
+    # 3) TLS handshake with the default (certifi) verification
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, 443), timeout=10) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as tls:
+                issuer = dict(x[0] for x in tls.getpeercert().get("issuer", []))
+                lines.append("TLS (default certs): OK, cert issuer=" +
+                             str(issuer.get("organizationName", issuer)))
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"TLS (default certs): FAIL {type(exc).__name__}: {str(exc)[:160]}"
+                     "  <- antivirus/proxy is likely intercepting HTTPS")
+
+    # 4) full HTTPS request, before and after OS-trust-store + IPv4 preference
+    def http(label):
         try:
             resp = requests.get(url, timeout=15, proxies=proxies)
-            lines.append(f"{label}: OK (HTTP {resp.status_code})")
-            return True
-        except Exception as exc:  # noqa: BLE001 - diagnostic
-            lines.append(f"{label}: FAIL {type(exc).__name__}: {str(exc)[:200]}")
-            return False
+            lines.append(f"HTTPS {label}: OK (HTTP {resp.status_code})")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"HTTPS {label}: FAIL {type(exc).__name__}: {str(exc)[:180]}")
 
-    attempt("with bundled certs")     # what a plain requests call does today
+    http("plain")
     try:
         import truststore
         truststore.inject_into_ssl()
         lines.append("OS trust store: injected")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"OS trust store: inject failed: {exc}")
-    attempt("with Windows trust store")
+    _prefer_ipv4()
+    http("with OS trust store + IPv4")
 
     out = os.path.join(tempfile.gettempdir(), "timeapp_nettest.txt")
     with open(out, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines))
+        fh.write("\n".join(lines) + "\n")
     os._exit(0)
 
 
