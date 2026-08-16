@@ -60,8 +60,8 @@ class Store:
     @staticmethod
     def _read_json(path):
         try:
-            text = path.read_text("utf-8")
-        except OSError:
+            text = path.read_text("utf-8-sig")  # tolerate a stray BOM
+        except (OSError, UnicodeError):
             return None
         if not text.strip():
             return None  # empty/truncated (e.g. a crash mid-write)
