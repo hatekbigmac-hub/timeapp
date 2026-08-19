@@ -284,6 +284,59 @@ def run_selftest() -> int:
     for state in ("starting", "ok", "network", "conflict", "unauthorized"):
         assert t("en", f"status_{state}") != f"status_{state}", f"status key {state}"
 
+    # --- robust transport (mocked, no network) ---
+    import net as _net
+    import requests as _rq
+    _net.install()
+    _net.install()  # idempotent
+    with _net.force_ip("9.9.9.9"):
+        assert getattr(_net._TLS, "ip", None) == "9.9.9.9", "force_ip sets thread-local"
+    assert getattr(_net._TLS, "ip", None) is None, "force_ip restores after the block"
+
+    tr = _net.Transport()
+    tr._doh_ips = ["1.2.3.4"]  # avoid a real DoH lookup
+    order = tr._strategies()
+    assert order[0] == "" and "1.2.3.4" in order, "direct first, DoH IP included"
+    assert order.count("") == 1, "strategies are de-duplicated"
+
+    class _Resp:
+        status_code = 200
+
+    class _Sess:  # works both directly and as `with requests.Session() as s`
+        def __init__(self, fail_times=0):
+            self.calls = 0
+            self.fail_times = fail_times
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def post(self, *a, **k):
+            self.calls += 1
+            if self.calls <= self.fail_times:
+                raise _rq.RequestException("blocked route")
+            return _Resp()
+
+    _orig_factory = _net.requests.Session
+    try:
+        # every strategy fails -> raises
+        _net.requests.Session = lambda: _Sess(fail_times=99)
+        t_fail = _net.Transport()
+        t_fail._doh_ips = []
+        try:
+            t_fail.post(_Sess(fail_times=99), "https://api.telegram.org/x", (1, 1))
+            assert False, "post should raise when every strategy fails"
+        except _rq.RequestException:
+            pass
+        # direct fails but a forced-IP fallback works, and is remembered
+        _net.requests.Session = lambda: _Sess(fail_times=0)
+        t_ok = _net.Transport()
+        t_ok._doh_ips = []
+        assert t_ok.post(_Sess(fail_times=99), "https://api.telegram.org/x",
+                         (1, 1)).status_code == 200, "falls through to a working strategy"
+        assert t_ok._preferred, "a working fallback IP is remembered as preferred"
+    finally:
+        _net.requests.Session = _orig_factory
+
     # --- network setup + proxy config ---
     setup_network("")  # must never raise, even if truststore is unavailable
     with tempfile.TemporaryDirectory() as tmp:
@@ -362,35 +415,14 @@ def setup_network(proxy: str = ""):
         truststore.inject_into_ssl()
     except Exception:
         pass
-    _prefer_ipv4()
+    import net
+    net.install()  # IPv4 preference + per-thread IP forcing for the fallbacks
     import os
     for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
         os.environ.pop(key, None)
     if proxy:
         os.environ["HTTP_PROXY"] = proxy
         os.environ["HTTPS_PROXY"] = proxy
-
-
-def _prefer_ipv4():
-    """Prefer IPv4 for outgoing connections.
-
-    On networks whose IPv6 is advertised but broken, Python tries the IPv6
-    address first and stalls until timeout — the app then reports "can't reach
-    Telegram" although IPv4 internet works fine. We filter DNS results to IPv4,
-    falling back to whatever exists so IPv6-only setups still work.
-    """
-    import socket
-    if getattr(socket, "_timeapp_ipv4", False):
-        return
-    original = socket.getaddrinfo
-
-    def ipv4_first(host, *args, **kwargs):
-        results = original(host, *args, **kwargs)
-        v4 = [r for r in results if r[0] == socket.AF_INET]
-        return v4 or results
-
-    socket.getaddrinfo = ipv4_first
-    socket._timeapp_ipv4 = True
 
 
 def run_nettest() -> int:
@@ -470,8 +502,20 @@ def run_nettest() -> int:
         lines.append("OS trust store: injected")
     except Exception as exc:  # noqa: BLE001
         lines.append(f"OS trust store: inject failed: {exc}")
-    _prefer_ipv4()
+
+    import net
+    net.install()
     http("with OS trust store + IPv4")
+
+    # 5) the full multi-strategy transport (DoH resolve + IP pinning fallbacks)
+    lines.append("DoH resolve: " + str(net.doh_resolve() or "failed"))
+    try:
+        transport = net.Transport()
+        resp = transport.post(requests.Session(), url, (8, 15))
+        used = transport._preferred or "direct"
+        lines.append(f"robust transport: OK (HTTP {resp.status_code}) via {used}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"robust transport: FAIL {type(exc).__name__}: {str(exc)[:180]}")
 
     out = os.path.join(tempfile.gettempdir(), "timeapp_nettest.txt")
     with open(out, "w", encoding="utf-8") as fh:

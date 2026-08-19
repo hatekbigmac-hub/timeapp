@@ -14,6 +14,7 @@ import threading
 
 import requests
 
+import net
 import version
 from i18n import dow, fmt_date, fmt_duration, fmt_minutes, t
 
@@ -42,6 +43,7 @@ class TelegramBot(threading.Thread):
         self.stop_event = threading.Event()
         self.session = requests.Session()          # used by the polling thread only
         self.notify_session = requests.Session()    # used by the notify thread only
+        self.transport = net.Transport()            # multi-strategy connectivity
         self.notify_q = queue.Queue()
         self.username = None
         self.status = "starting"
@@ -49,16 +51,19 @@ class TelegramBot(threading.Thread):
         self.offset = 0
 
     # -- low-level API ---------------------------------------------------
+    CONNECT_TIMEOUT = 8  # fail a blocked route fast so fallbacks get their turn
+
     def api(self, method, params=None, files=None, http_timeout=20, session=None):
         session = session or self.session
         url = f"https://api.telegram.org/bot{self.token}/{method}"
         params = params or {}
+        timeout = (self.CONNECT_TIMEOUT, http_timeout)
         if files:
             data = {key: (json.dumps(value) if isinstance(value, (dict, list)) else value)
                     for key, value in params.items()}
-            resp = session.post(url, data=data, files=files, timeout=http_timeout)
+            resp = self.transport.post(session, url, timeout, data=data, files=files)
         else:
-            resp = session.post(url, json=params, timeout=http_timeout)
+            resp = self.transport.post(session, url, timeout, json=params)
         try:
             payload = resp.json()
         except ValueError:
