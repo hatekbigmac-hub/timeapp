@@ -276,6 +276,12 @@ class SettingsDialog(QDialog):
         self.btn_update.clicked.connect(self._check_update)
         upd_row.addWidget(self.btn_update)
         root.addLayout(upd_row)
+        # prominent one-click update button (checks + downloads + installs)
+        self.btn_do_update = QPushButton(t(self.lang, "set_update_now"))
+        self.btn_do_update.setProperty("cls", "accent")
+        self.btn_do_update.setCursor(Qt.PointingHandCursor)
+        self.btn_do_update.clicked.connect(self._check_update)
+        root.addWidget(self.btn_do_update)
         self.update_status = QLabel(t(self.lang, "set_version", value=version.APP_VERSION))
         self.update_status.setProperty("cls", "muted")
         root.addWidget(self.update_status)
@@ -465,13 +471,19 @@ class SettingsDialog(QDialog):
         self.store.set_config("update_repo", repo)
         self.repo_input.setText(repo)
 
+    def _update_buttons(self, enabled):
+        for name in ("btn_update", "btn_do_update"):
+            btn = getattr(self, name, None)
+            if btn:
+                btn.setEnabled(enabled)
+
     def _check_update(self):
         self._save_repo()
         repo = self.store.get_config("update_repo", "") or ""
         if not repo:
             self.update_status.setText(t(self.lang, "set_update_bad_repo"))
             return
-        self.btn_update.setEnabled(False)
+        self._update_buttons(False)
         self.update_status.setText(t(self.lang, "cmd_update_checking")
                                    .replace("\U0001F504 ", ""))
         QApplication.processEvents()
@@ -479,9 +491,9 @@ class SettingsDialog(QDialog):
             info = updater.check(repo)
         except Exception as exc:
             self.update_status.setText(t(self.lang, "cmd_update_failed", value=str(exc)[:80]))
-            self.btn_update.setEnabled(True)
+            self._update_buttons(True)
             return
-        self.btn_update.setEnabled(True)
+        self._update_buttons(True)
         if not info:
             self.update_status.setText(t(self.lang, "set_update_none"))
             return
